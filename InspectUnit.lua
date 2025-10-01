@@ -153,7 +153,58 @@ local function TI_CountSockets(itemLink)
     return n
 end
 
+-- Stats Adding
 
+local stamina = 0
+local strength = 0
+local agility = 0
+local int = 0
+local hit = 0
+local haste = 0
+local crit = 0
+local mastery = 0
+local expertise = 0
+local dodge = 0
+local parry = 0
+local armor = 0
+--[[
+local CLASS_PRIMARY_BONUS = {
+  MAGE     = "INT", PRIEST   = "INT", WARLOCK  = "INT",
+  WARRIOR  = "STR", DEATHKNIGHT = "STR", PALADIN  = "STR",
+  HUNTER   = "AGI", ROGUE    = "AGI", SHAMAN   = "AGI",
+  DRUID    = "AGI",
+}
+
+local RACIAL_BONUS = {
+  Human   = { SPIRIT = 0.03 },
+  Tauren  = { STA    = 0.05 },
+  NightElf= { DODGE  = 0.02 },
+  Dwarf   = { EXPERTISE_MACE = 0.01 },
+  Orc     = { EXPERTISE_AXE  = 0.01 },
+  Gnome   = { EXPERTISE_DAGGER=0.01 },
+}
+
+local function applyBonuses(totals, class, race)
+  -- Class Boni
+  local primary = CLASS_PRIMARY_BONUS[class]
+  if primary and totals[primary] then
+    totals[primary] = math.floor(totals[primary] * 1.05 + 0.5)
+  end
+
+  -- Racial Boni
+  local rbonus = RACIAL_BONUS[race]
+  if rbonus then
+    for stat, bonus in pairs(rbonus) do
+      if totals[stat] then
+        totals[stat] = math.floor(totals[stat] * (1 + bonus) + 0.5)
+      end
+    end
+  end
+
+  return totals
+end
+]]--
+-- Stats end
 
 function ShowInspectItemListFrame(unit, parent, ilevel, maxLevel)
     if (not parent:IsShown()) then return end
@@ -178,6 +229,21 @@ function ShowInspectItemListFrame(unit, parent, ilevel, maxLevel)
     end
     for i, v in ipairs(slots) do
         _, level, name, link, quality = LibItemInfo:GetUnitItemInfo(unit, v.index)
+		--[[local stats = LibItemInfo:GetNormalizedItemStats(unit, v.index)
+		if stats then
+		  stamina   = stamina   + (stats.STA or 0)
+		  strength  = strength  + (stats.STR or 0)
+		  agility   = agility   + (stats.AGI or 0)
+		  int       = int       + (stats.INT or 0)
+		  hit       = hit       + (stats.HIT or 0)
+		  crit      = crit      + (stats.CRIT or 0)
+		  haste     = haste     + (stats.HASTE or 0)
+		  mastery   = mastery   + (stats.MASTERY or 0)
+		  expertise = expertise + (stats.EXPERTISE or 0)
+		  dodge     = dodge     + (stats.DODGE or 0)
+		  parry     = parry     + (stats.PARRY or 0)
+		  armor     = armor     + (stats.ARMOR or 0)
+		end]]--
         itemframe = frame["item"..i]
         itemframe.name = name
         itemframe.link = link
@@ -239,7 +305,21 @@ function ShowInspectItemListFrame(unit, parent, ilevel, maxLevel)
     frame:SetBackdrop(frame.backdrop)
     frame:SetBackdropColor(0, 0, 0, 0.9)
     frame:SetBackdropBorderColor(color.r, color.g, color.b)
+	
+	
+	--local classLocalized, class = UnitClass(unit)
+	--local raceLocalized,  race  = UnitRace(unit)
+	--local level = UnitLevel(unit)
 
+	-- Basestats OHNE applyBonuses
+	--local base = BaseStats.GetBaseStats(class, race, level, { applyBonuses = false })
+
+	-- Auf deine Variablen addieren
+	--stamina   = stamina   + (base.STA or 0)
+	--strength  = strength  + (base.STR or 0)
+	--agility   = agility   + (base.AGI or 0)
+	--int       = int       + (base.INT or 0)
+		
     return frame
 end
 

@@ -204,3 +204,125 @@ function lib:GetQuestItemlink(questType, id)
     tooltip:SetQuestLogItem(questType, id)
     return select(2, tooltip:GetItem()) or GetQuestLogItemLink(questType, id)
 end
+
+
+-- 2025-08-19 - Adding new functions to get values of the items
+
+
+local STAT_MAP = {
+  -- Primary
+  ITEM_MOD_STRENGTH_SHORT = "STR",       ITEM_MOD_STRENGTH = "STR",
+  ITEM_MOD_AGILITY_SHORT  = "AGI",       ITEM_MOD_AGILITY  = "AGI",
+  ITEM_MOD_STAMINA_SHORT  = "STA",       ITEM_MOD_STAMINA  = "STA",
+  ITEM_MOD_INTELLECT_SHORT= "INT",       ITEM_MOD_INTELLECT= "INT",
+
+  -- Haste (unified + legacy spell/melee/ranged variants)
+  ITEM_MOD_HASTE_RATING_SHORT   = "HASTE", ITEM_MOD_HASTE_RATING   = "HASTE",
+  ITEM_MOD_SPELL_HASTE_RATING_SHORT = "HASTE", ITEM_MOD_SPELL_HASTE_RATING = "HASTE",
+  ITEM_MOD_MELEE_HASTE_RATING_SHORT = "HASTE", ITEM_MOD_MELEE_HASTE_RATING = "HASTE",
+  ITEM_MOD_RANGED_HASTE_RATING_SHORT= "HASTE", ITEM_MOD_RANGED_HASTE_RATING= "HASTE",
+
+  -- Crit (unified + legacy split)
+  ITEM_MOD_CRIT_RATING_SHORT    = "CRIT",  ITEM_MOD_CRIT_RATING    = "CRIT",
+  ITEM_MOD_CRIT_MELEE_RATING_SHORT = "CRIT", ITEM_MOD_CRIT_MELEE_RATING = "CRIT",
+  ITEM_MOD_CRIT_RANGED_RATING_SHORT= "CRIT", ITEM_MOD_CRIT_RANGED_RATING= "CRIT",
+  ITEM_MOD_CRIT_SPELL_RATING_SHORT = "CRIT", ITEM_MOD_CRIT_SPELL_RATING = "CRIT",
+
+  -- Mastery
+  ITEM_MOD_MASTERY_RATING_SHORT = "MASTERY", ITEM_MOD_MASTERY_RATING = "MASTERY",
+
+  -- Hit (unified + legacy split)
+  ITEM_MOD_HIT_RATING_SHORT     = "HIT",  ITEM_MOD_HIT_RATING     = "HIT",
+  ITEM_MOD_HIT_MELEE_RATING_SHORT  = "HIT", ITEM_MOD_HIT_MELEE_RATING  = "HIT",
+  ITEM_MOD_HIT_RANGED_RATING_SHORT = "HIT", ITEM_MOD_HIT_RANGED_RATING = "HIT",
+  ITEM_MOD_HIT_SPELL_RATING_SHORT  = "HIT", ITEM_MOD_HIT_SPELL_RATING  = "HIT",
+
+  -- Expertise
+  ITEM_MOD_EXPERTISE_RATING_SHORT = "EXPERTISE", ITEM_MOD_EXPERTISE_RATING = "EXPERTISE",
+
+  -- Dodge / Parry
+  ITEM_MOD_DODGE_RATING_SHORT   = "DODGE", ITEM_MOD_DODGE_RATING   = "DODGE",
+  ITEM_MOD_PARRY_RATING_SHORT   = "PARRY", ITEM_MOD_PARRY_RATING   = "PARRY",
+  
+  ITEM_MOD_SPELL_POWER = "SP",
+  ITEM_MOD_MASTERY_SHORT = "MASTERY",
+  ITEM_MOD_DAMAGE_PER_SECOND_SHORT = "DPS",
+  ITEM_MOD_PVP_POWER_SHORT = "PVP_PWR",
+  
+  -- Sockets (Anzahl der Sockel)
+  EMPTY_SOCKET_META = "SOCKET_META",EMPTY_SOCKET_META1 = "SOCKET_META",EMPTY_SOCKET_META2 = "SOCKET_META",
+  EMPTY_SOCKET_BLUE = "SOCKET_BLUE",EMPTY_SOCKET_BLUE1 = "SOCKET_BLUE",EMPTY_SOCKET_BLUE2 = "SOCKET_BLUE",EMPTY_SOCKET_BLUE3 = "SOCKET_BLUE",
+  EMPTY_SOCKET_RED = "SOCKET_RED",EMPTY_SOCKET_RED1 = "SOCKET_RED",EMPTY_SOCKET_RED2 = "SOCKET_RED",EMPTY_SOCKET_RED3 = "SOCKET_RED",
+  EMPTY_SOCKET_YELLOW = "SOCKET_YELLOW",EMPTY_SOCKET_YELLOW1 = "SOCKET_YELLOW",EMPTY_SOCKET_YELLOW2 = "SOCKET_YELLOW",EMPTY_SOCKET_YELLOW3 = "SOCKET_YELLOW",
+  EMPTY_SOCKET_ORANGE = "SOCKET_ORANGE",EMPTY_SOCKET_ORANGE1 = "SOCKET_ORANGE",EMPTY_SOCKET_ORANGE2 = "SOCKET_ORANGE",EMPTY_SOCKET_ORANGE3 = "SOCKET_ORANGE",
+  EMPTY_SOCKET_VIOLET = "SOCKET_VIOLET",EMPTY_SOCKET_VIOLET1 = "SOCKET_VIOLET",EMPTY_SOCKET_VIOLET2 = "SOCKET_VIOLET",EMPTY_SOCKET_VIOLET3 = "SOCKET_VIOLET",
+  EMPTY_SOCKET_GREEN = "SOCKET_GREEN",EMPTY_SOCKET_GREEN1 = "SOCKET_GREEN",EMPTY_SOCKET_GREEN2 = "SOCKET_GREEN",EMPTY_SOCKET_GREEN3 = "SOCKET_GREEN",
+  
+  -- Armor (GetItemStats nutzt RESISTANCE0_NAME für Rüstung)
+  RESISTANCE0_NAME = "ARMOR",
+  
+  
+}
+
+
+local STAT_KEYS = {
+  "STA", "STR", "AGI", "INT",
+  "HIT", "HASTE", "CRIT", "MASTERY", "EXPERTISE",
+  "DODGE", "PARRY", "ARMOR",
+}
+
+local SOCKET_KEYS = {
+  "META", "BLUE", "RED", "YELLOW", "PRISMATIC",
+}
+
+
+function lib:GetNormalizedItemStats(unit, slot)
+	local link = GetInventoryItemLink(unit, slot)
+	if not link then return nil end
+
+	local statTbl = GetItemStats(link)
+	if not statTbl then return nil end
+
+	-- Ergebnis mit fixen Werten
+	local result = {}
+
+	-- Initialisieren
+	for _, key in ipairs(STAT_KEYS) do
+		result[key] = 0
+	end
+
+	-- Socket-Container
+	result.SOCKETS = {}
+	for _, key in ipairs(SOCKET_KEYS) do
+		result.SOCKETS[key] = 0
+	end
+
+	-- Werte befüllen
+	for statKey, value in pairs(statTbl) do
+	local shortName = STAT_MAP[statKey]
+
+	if shortName and result[shortName] ~= nil then
+		result[shortName] = result[shortName] + value
+	elseif statKey:match("^EMPTY_SOCKET_") then
+		local socketType = statKey:gsub("EMPTY_SOCKET_", "")
+		result.SOCKETS[socketType] = (result.SOCKETS[socketType] or 0) + value
+	elseif statKey == "RESISTANCE0_NAME" then
+		result.ARMOR = value
+	end
+	end
+
+	return result
+end
+
+function lib:GetItemValues(unit,slot)
+	local link = GetInventoryItemLink(unit, slot)
+	if link then
+		local statTbl = GetItemStats(link)
+		if statTbl then
+			for statKey, value in pairs(statTbl) do
+				local shortName = STAT_MAP[statKey]
+				print("ItemID: " .. slot .. " with Stat " .. shortName .. " = " .. value)
+			end
+		end
+	end
+end

@@ -5,6 +5,94 @@ local LibItemGem = LibStub:GetLibrary("LibItemGem.7000")
 local LibSchedule = LibStub:GetLibrary("LibSchedule.7000")
 local LibItemEnchant = LibStub:GetLibrary("LibItemEnchant.7000")
 
+ns = ns or {}
+local L = ns.L
+if not L then
+    local ok, ace = pcall(LibStub, "AceLocale-3.0")
+    if ok and ace then
+        local locale = ace:GetLocale(addon, true) -- true = silent
+        if locale then
+            L = locale
+        end
+    end
+end
+if not L then
+    -- Fallback passthrough (returns the key)
+    L = setmetatable({}, { __index = function(t, k) return k end })
+end
+ns.L = L
+
+local function TI_StripColorCodes(s)
+    if not s then return s end
+    -- remove |cAARRGGBB and |r
+    s = s:gsub("|c%x%x%x%x%x%x%x%x", "")
+    s = s:gsub("|r", "")
+    return s
+end
+
+-- [ADD][FIND THIS: TI_SCANNER_BLOCK]
+-- Passive tooltip scanner to read item tooltips when LibItemEnchant fails.
+local TI_SCAN_TT = CreateFrame("GameTooltip", "TinyInspect_ScanTooltip", UIParent, "GameTooltipTemplate")
+TI_SCAN_TT:SetOwner(UIParent, "ANCHOR_NONE")
+
+-- [REPLACE][FIND THIS: TI_SCANNER_BLOCK]
+local function TI_ScanEnchantFromTooltip(itemLink)
+    -- Returns: found(boolean), text(string or nil), isLW(boolean)
+    if not itemLink then return false, nil, false end
+    TI_SCAN_TT:ClearLines()
+    TI_SCAN_TT:SetHyperlink(itemLink)
+
+    local foundText, isLW = nil, false
+    local n = TI_SCAN_TT:NumLines() or 0
+    for i = 2, n do
+        local line = _G["TinyInspect_ScanTooltipTextLeft"..i]
+        local raw = line and line:GetText()
+        if raw and raw ~= "" then
+            -- strip WoW color codes
+            local cleaned = TI_StripColorCodes(raw)
+            local lower = cleaned:lower()
+
+            -- Leatherworking requirement?
+            -- L["REQ_LEATHERWORKING_LWR"] must be a lowercase needle (see Locales).
+            local lw_need = L["REQ_LEATHERWORKING_LWR"]
+            if type(lw_need) == "string" and lw_need ~= "" and lower:find(lw_need, 1, true) then
+                isLW = true
+            end
+			
+			local lw_need = L["REQ_LEATHERWORKING_ING"]
+            if type(lw_need) == "string" and lw_need ~= "" and lower:find(lw_need, 1, true) then
+                isLW = true
+            end
+
+            -- Enchant line?
+            local m
+            -- Patterns come pre-lowercased and should start with ^(
+            local p_de = L["ENCHANT_PREFIX_DE_MATCH"]
+            local p_en = L["ENCHANT_PREFIX_EN_MATCH"]
+            if type(p_de) == "string" and p_de ~= "" then
+                m = lower:match(p_de)
+            end
+            if not m and type(p_en) == "string" and p_en ~= "" then
+                m = lower:match(p_en)
+            end
+            if m then
+                -- keep cleaned (but original-cased) text for display
+                foundText = cleaned
+            end
+        end
+    end
+    return (foundText ~= nil) or isLW, foundText, isLW
+end
+
+
+
+local ED_BASE_SOCKET_KEYS = {
+  "EMPTY_SOCKET_RED",
+  "EMPTY_SOCKET_YELLOW",
+  "EMPTY_SOCKET_BLUE",
+  "EMPTY_SOCKET_META",
+}
+
 local function CreateIconFrame(frame, index)
     local icon = CreateFrame("Button", nil, frame)
     icon.index = index
@@ -59,7 +147,7 @@ local function HideAllIconFrame(frame)
 end
 
 local function TI_CountSockets(itemLink)
-    local stats = (TI_GetItemStats or GetItemStats)(itemLink)
+    local stats = (TI_GetItemStats or C_Item.GetItemStats)(itemLink)
     local n = 0
     if stats then
         for k, v in pairs(stats) do
@@ -100,20 +188,6 @@ local function TI_UnitHasBlacksmithing(unit)
 end
 
 
-local function CheckExtraSocket(unit, slotId)
-    local link = GetInventoryItemLink(unit, slotId)
-    if not link then return true end -- leerer Slot -> keine Warnung
-    -- Extra-Sockel-Erkennung: 100 % sicher nur über Tooltip/ItemStats
-    local stats = GetItemStats(link)
-    if not stats then return false end
-    -- Wenn mehr als normaler Sockeltyp vorhanden → true
-    -- Normalerweise prüft man hier auch Gems, aber wir gehen auf vorhandene Sockelanzahl
-    local sockets = (stats["EMPTY_SOCKET_PRISMATIC"] or 0) +
-                    (stats["EMPTY_SOCKET_RED"] or 0) +
-                    (stats["EMPTY_SOCKET_YELLOW"] or 0) +
-                    (stats["EMPTY_SOCKET_BLUE"] or 0)
-    return sockets > 0
-end
 
 local function GetIconFrame(frame)
     local index = 1
@@ -162,8 +236,114 @@ local function UpdateIconTexture(icon, texture, data, dataType)
     end
 end
 
+local function TI_GetEnchantIdFromItemLink(link)
+    if type(link) ~= "string" then return nil end
+    -- Extract the colon-separated payload right after "item:"
+    local payload = link:match("item:([^|]+)")
+    if not payload then return nil end
+    -- ENCHANT is the 2nd field in the payload
+    local first, enchant = payload:match("^([^:]*):([^:]*)")
+    if enchant and enchant ~= "" then
+        local eid = tonumber(enchant)
+        return eid
+    end
+    return nil
+end
+
+-- [FIX] Belt Buckle detection:
+-- Count base sockets (colored/meta) vs TOTAL sockets (all EMPTY_SOCKET_*).
+-- A buckle adds exactly +1 socket; even if empty we still see TOTAL > BASE.
+local function ED_HasBuckle_ByGems(unit, slot)
+  unit = unit or "player"
+  slot = slot or INVSLOT_WAIST
+
+  local link = GetInventoryItemLink(unit, slot)
+  if not link then
+    return false, 0, 0, nil -- hasBuckle, baseCount, lastGemIndex, link
+  end
+
+  local stats = GetItemStats(link) or {}
+  local baseCount, totalCount = 0, 0
+
+  -- BASE = only the native colored/meta sockets (no buckle)
+  for _, key in ipairs(ED_BASE_SOCKET_KEYS) do
+    local n = stats[key]
+    if n and n > 0 then baseCount = baseCount + n end
+  end
+
+  -- TOTAL = every empty socket stat found on the item
+  for k, v in pairs(stats) do
+    if type(k) == "string" and k:find("^EMPTY_SOCKET_") then
+      totalCount = totalCount + (tonumber(v) or 0)
+    end
+  end
+
+  -- Legacy heuristic: look at gems actually inserted
+  local lastGemIndex = 0
+  for i = 1, 4 do
+    local _, gemLink = GetItemGem(link, i)
+    if gemLink then lastGemIndex = i end
+  end
+
+  -- Prefer stat-based detection: buckle adds exactly +1 socket on belts
+  local hasBuckle = (totalCount > baseCount) or (lastGemIndex > baseCount)
+
+  return hasBuckle, baseCount, lastGemIndex, link
+end
+
+
+
+local function TI_ResolveUnitFromItemFrame(itemframe)
+    -- Inspect path: parent usually has .unit
+    if itemframe and itemframe.GetParent then
+        local p = itemframe:GetParent()
+        if p and p.unit then
+            return p.unit
+        end
+    end
+    -- Fallback: InspectFrame knows the inspected unit if open
+    if _G.InspectFrame and InspectFrame.unit then
+        return InspectFrame.unit
+    end
+    -- Default to player when nothing else is known (PaperDoll)
+    return "player"
+end
+
+local function TI_FindItemListFrameFromArgs(...)
+    for i = 1, select("#", ...) do
+        local arg = select(i, ...)
+        if type(arg) == "table" then
+            -- Heuristic: TinyInspect list frames expose "item1", "item2", ...
+            if rawget(arg, "item1") or rawget(arg, "item2") then
+                return arg
+            end
+            -- Some builds attach it as ".characterFrame" or ".inspectFrame"
+            if arg.characterFrame and (rawget(arg.characterFrame, "item1") or rawget(arg.characterFrame, "item2")) then
+                return arg.characterFrame
+            end
+            if arg.inspectFrame and (rawget(arg.inspectFrame, "item1") or rawget(arg.inspectFrame, "item2")) then
+                return arg.inspectFrame
+            end
+        end
+    end
+    -- Last resort: try well-known globals if present
+    if _G.TinyInspectItemListFrame and (rawget(_G.TinyInspectItemListFrame, "item1") or rawget(_G.TinyInspectItemListFrame, "item2")) then
+        return _G.TinyInspectItemListFrame
+    end
+    return nil
+end
+
 local function ShowGemAndEnchant(frame, ItemLink, anchorFrame, itemframe)
-    if (not ItemLink) then return 0 end
+    -- Always try to recover a missing link on the player's PaperDoll
+    if (not ItemLink) and itemframe then
+        local unit = TI_ResolveUnitFromItemFrame(itemframe)
+        if unit and itemframe.index then
+            ItemLink = GetInventoryItemLink(unit, itemframe.index)
+        end
+    end
+    if (not ItemLink) then
+        return 0
+    end
     local num, info, qty = LibItemGem:GetItemGemInfo(ItemLink)
     local _, quality, texture, icon, r, g, b
     for i, v in ipairs(info) do
@@ -186,34 +366,69 @@ local function ShowGemAndEnchant(frame, ItemLink, anchorFrame, itemframe)
         anchorFrame = icon
     end
 	-- Belt Buckle Check (MoP)
-	if itemframe and itemframe.index == 6 then -- 6 = Taille
-        local sockets = TI_CountSockets(ItemLink)
-        if sockets == 0 then
-            -- keine Schnalle (kein zusätzlicher Sockel) -> Warn-Icon
-            num = num + 1
-            local icon = GetIconFrame(frame)
-            icon.title = (GetLocale():sub(1,2) == "de") and "Gürtelschnalle fehlt" or "Belt Buckle missing"
-            icon.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
-            icon.texture:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
-            icon.itemLink = nil
-            icon.spellID  = nil
-            icon:ClearAllPoints()
-            icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
-            icon:Show()
-        end
-        return num * 18
-    end
+	if itemframe and itemframe.index == INVSLOT_WAIST then
+		local unit = TI_ResolveUnitFromItemFrame(itemframe)
+		local waistLink = GetInventoryItemLink(unit, INVSLOT_WAIST) or ItemLink
+
+		local hasBuckle, baseSockets, gemSlots, _ = ED_HasBuckle_ByGems(unit, INVSLOT_WAIST)
+
+		-- Fallback ONLY for yourself: a belt enchant id implies buckle present (older clients)
+		if unit == "player" and waistLink and not hasBuckle then
+			local enchantId = TI_GetEnchantIdFromItemLink(waistLink)
+			local eItemID, eID = LibItemEnchant:GetEnchantItemID(waistLink)
+			local eSpellID    = LibItemEnchant:GetEnchantSpellID(waistLink)
+			local hasEnchant  = (enchantId and enchantId > 0)
+							 or (eItemID and eItemID ~= 0)
+							 or (eSpellID and eSpellID ~= 0)
+							 or (eID and eID ~= 0)
+			if hasEnchant then
+				hasBuckle = true
+			end
+		end
+
+		-- Extra fallback ONLY for yourself: a belt enchant implies buckle present (legacy behavior)
+		if unit == "player" and waistLink and not hasBuckle then
+			local enchantId = TI_GetEnchantIdFromItemLink(waistLink)
+			local eItemID, eID = LibItemEnchant:GetEnchantItemID(waistLink)
+			local eSpellID    = LibItemEnchant:GetEnchantSpellID(waistLink)
+			local hasEnchant  = (enchantId and enchantId > 0)
+							 or (eItemID and eItemID ~= 0)
+							 or (eSpellID and eSpellID ~= 0)
+							 or (eID and eID ~= 0)
+			if hasEnchant then
+				hasBuckle = true
+			end
+		end
+
+		if not hasBuckle then
+			num = num + 1
+			local icon = GetIconFrame(frame)
+			icon.title = (GetLocale():sub(1,2) == "de") and "Gürtelschnalle fehlt" or "Belt Buckle missing"
+			icon.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
+			icon.texture:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
+			icon.itemLink, icon.spellID = nil, nil
+			icon:ClearAllPoints()
+			icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+			icon:Show()
+		end
+
+		return num * 18
+	end
+
+
 	
 	-- Ring Enchanting. If Profession not available = Ignore!
 	if itemframe and (itemframe.index == 11 or itemframe.index == 12) then
-        local unit = itemframe:GetParent() and itemframe:GetParent().unit or "player"
+        --local unit = itemframe:GetParent() and itemframe:GetParent().unit or "player"
+		local unit = TI_ResolveUnitFromItemFrame(itemframe)
         if not TI_UnitHasEnchanting(unit) then
             return num * 18
         end
     end
 	
 	if itemframe and (itemframe.index == 9 or itemframe.index == 10) then -- 9 = Armschienen, 10 = Handschuhe
-		local unit = itemframe:GetParent() and itemframe:GetParent().unit or "player"
+		--local unit = itemframe:GetParent() and itemframe:GetParent().unit or "player"
+		local unit = TI_ResolveUnitFromItemFrame(itemframe)
 		if TI_UnitHasBlacksmithing(unit) then
 			local sockets = TI_CountSockets(ItemLink)
 			if sockets == 0 then
@@ -287,6 +502,32 @@ local function ShowGemAndEnchant(frame, ItemLink, anchorFrame, itemframe)
             anchorFrame = icon
         end
     end
+	-- [ADD][FIND THIS: TI_TOOLTIP_FALLBACK]
+    if not (enchantItemID or enchantSpellID or enchantID) then
+        local ok, text, isLW = TI_ScanEnchantFromTooltip(ItemLink)
+        if ok then
+            num = num + 1
+            local icon2 = GetIconFrame(frame)
+            icon2.itemLink, icon2.spellID = nil, nil
+
+            if isLW then
+                -- We detected a Leatherworking-only enchant (via requirement line).
+                icon2.title = ns.L["LW_ENCHANT_DETECTED"]
+                icon2.bg:SetVertexColor(0.2, 0.8, 0.2, 0.7)
+                icon2.texture:SetTexture("Interface\\ICONS\\Trade_LeatherWorking")
+            else
+                -- We found an "Enchanted: ..." line; show the extracted text.
+                icon2.title = string.format("%s: %s", ENCHANTS, text or "?")
+                icon2.bg:SetVertexColor(1, 0.82, 0, 0.5)
+                icon2.texture:SetTexture("Interface\\FriendsFrame\\InformationIcon")
+            end
+
+            icon2:ClearAllPoints()
+            icon2:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+            icon2:Show()
+            anchorFrame = icon2
+        end
+    end
     return num * 18
 end
 
@@ -313,3 +554,33 @@ hooksecurefunc("ShowInspectItemListFrame", function(unit, parent, itemLevel, max
         HideAllIconFrame(frame)
     end
 end)
+
+-- [FALLBACK] When PaperDoll updates, re-decorate the TinyInspect list directly
+hooksecurefunc("PaperDollItemSlotButton_Update", function()
+    if not (TinyInspectClassicDB and TinyInspectClassicDB.ShowGemAndEnchant) then return end
+
+    -- Try to locate the TinyInspect list frame tied to the character
+    local frame = TI_FindItemListFrameFromArgs(CharacterFrame)
+                  or (CharacterFrame and CharacterFrame.characterFrame)
+                  or (CharacterFrame and CharacterFrame.inspectFrame)
+
+    if not frame then return end
+
+    local i, width = 1, frame:GetWidth()
+    HideAllIconFrame(frame)
+    while (frame["item"..i]) do
+        local itemframe = frame["item"..i]
+        local iconWidth = ShowGemAndEnchant(frame, itemframe.link, itemframe.itemString, itemframe)
+        if (width < (itemframe.width or 0) + iconWidth + 36) then
+            width = (itemframe.width or 0) + iconWidth + 36
+        end
+        i = i + 1
+    end
+    if (width > frame:GetWidth()) then
+        frame:SetWidth(width)
+    end
+end)
+
+
+
+
