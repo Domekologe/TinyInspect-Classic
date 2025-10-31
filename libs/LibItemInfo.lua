@@ -148,6 +148,7 @@ function lib:GetUnitItemInfo(unit, index, stats)
     unittip:SetOwner(UIParent, "ANCHOR_NONE")
     unittip:SetInventoryItem(unit, index)
     local link = GetInventoryItemLink(unit, index) or select(2, unittip:GetItem())
+
     if (not link or link == "") then
         return 0, 0
     end
@@ -172,6 +173,37 @@ function lib:GetUnitItemInfo(unit, index, stats)
         return 0, tonumber(level) or 0, name
     end
 end
+
+function lib:GetUnitItemUpgradeInfo(unit, index)
+	local _, _, _, _, _, _, _, _, _, _, _ = self:GetUnitItemInfo(unit, index)
+	local stage, maxStage = 0, 0
+
+	unittip:SetOwner(UIParent, "ANCHOR_NONE")
+	unittip:SetInventoryItem(unit, index)
+
+	for i = 2, unittip:NumLines() do
+		local line = _G[unittip:GetName().."TextLeft" .. i]
+		local txt = line and line:GetText()
+		if txt then
+			-- Finde jedes Muster "X / Y"
+			local a, b = txt:match("(%d+)%s*/%s*(%d+)")
+			if a and b then
+				local na, nb = tonumber(a), tonumber(b)
+
+				-- Nur akzeptieren, wenn plausible Upgrade-Stufen:
+				-- maxStage 1–3 (Upgrade-System), niemals >3 (z. B. Setteile 1/5)
+				if nb <= 3 then
+					stage, maxStage = na, nb
+					break
+				end
+			end
+		end
+	end
+
+	return stage, maxStage
+end
+
+
 
 function lib:GetUnitItemLevel(unit, stats)
     local total, counts, maxlevel = 0, 0, 0

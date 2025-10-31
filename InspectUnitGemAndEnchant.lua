@@ -4,6 +4,7 @@ local addon, ns = ...
 local LibItemGem = LibStub:GetLibrary("LibItemGem.7000")
 local LibSchedule = LibStub:GetLibrary("LibSchedule.7000")
 local LibItemEnchant = LibStub:GetLibrary("LibItemEnchant.7000")
+local LibItemInfo = LibStub and LibStub:GetLibrary("LibItemInfo.7000", true)
 
 ns = ns or {}
 local L = ns.L
@@ -30,12 +31,10 @@ local function TI_StripColorCodes(s)
     return s
 end
 
--- [ADD][FIND THIS: TI_SCANNER_BLOCK]
 -- Passive tooltip scanner to read item tooltips when LibItemEnchant fails.
 local TI_SCAN_TT = CreateFrame("GameTooltip", "TinyInspect_ScanTooltip", UIParent, "GameTooltipTemplate")
 TI_SCAN_TT:SetOwner(UIParent, "ANCHOR_NONE")
 
--- [REPLACE][FIND THIS: TI_SCANNER_BLOCK]
 local function TI_ScanEnchantFromTooltip(itemLink)
     -- Returns: found(boolean), text(string or nil), isLW(boolean)
     if not itemLink then return false, nil, false end
@@ -159,15 +158,17 @@ local function TI_CountSockets(itemLink)
     return n
 end
 
+-- Profession specific Enchanting Checks
+-- 333 => Enchanting, 164 => Blacksmithing, 202 => Engineering
+
 local function TI_UnitHasEnchanting(unit)
     if unit ~= "player" then
-        -- Bei anderen Einheiten kennen wir die Berufe nicht -> nicht prüfen
         return false
     end
     local function hasEnchanting(profId)
         if not profId then return false end
         local _, _, _, _, _, _, skillLine = GetProfessionInfo(profId)
-        return skillLine == 333 -- 333 = Verzauberkunst / Enchanting
+        return skillLine == 333
     end
     local p1, p2 = GetProfessions()
     return hasEnchanting(p1) or hasEnchanting(p2)
@@ -181,12 +182,68 @@ local function TI_UnitHasBlacksmithing(unit)
     local function hasBS(profId)
         if not profId then return false end
         local _, _, _, _, _, _, skillLine = GetProfessionInfo(profId)
-        return skillLine == 164 -- 164 = Schmiedekunst
+        return skillLine == 164
     end
     local p1, p2 = GetProfessions()
     return hasBS(p1) or hasBS(p2)
 end
 
+local function TI_UnitHasEngineering(unit)
+    if unit ~= "player" then
+        return false
+    end
+    local function hasEng(profId)
+        if not profId then return false end
+        local _, _, _, _, _, _, skillLine = GetProfessionInfo(profId)
+        return skillLine == 202
+    end
+    local p1, p2 = GetProfessions()
+    return hasEng(p1) or hasEng(p2)
+end
+
+-- Profession Enchants End
+
+local PROF_ENCHANTS = {
+    Engineering = {
+        -- Handschuhe
+        [82175] = true, -- Synapse Springs
+        [54736] = true, -- Hyperspeed Accelerators (Wrath/Legacy)
+        [82200] = true, -- Quickflip Deflection Plates
+        -- Gürtel
+        [55016] = true, -- Nitro Boosts
+        [84425] = true, -- Frag Belt
+        -- Rücken
+        [55002] = true, -- Flexweave Underlay
+    },
+    Tailoring = {
+        [75175] = true, -- Lightweave Embroidery
+        [75172] = true, -- Swordguard Embroidery
+        [75170] = true, -- Darkglow Embroidery
+    },
+    Inscription = {
+        [61117] = true, -- Master's Inscription of the Axe
+        [61118] = true, -- Master's Inscription of the Crag
+        [61119] = true, -- Master's Inscription of the Pinnacle
+        [61120] = true, -- Master's Inscription of the Storm
+        [86403] = true, -- Inscription: Ox Horn
+        [86402] = true, -- Inscription: Crane Wing
+    },
+}
+
+local function TI_GetProfessionByEnchant(itemLink)
+    if not itemLink then return nil end
+    local _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, enchantID = strsplit(":", itemLink)
+
+    local eID = tonumber(enchantID)
+    if not eID or eID == 0 then return nil end
+
+    for prof, spells in pairs(PROF_ENCHANTS) do
+        if spells[eID] then
+            return prof, eID
+        end
+    end
+    return nil
+end
 
 
 local function GetIconFrame(frame)
@@ -250,7 +307,6 @@ local function TI_GetEnchantIdFromItemLink(link)
     return nil
 end
 
--- [FIX] Belt Buckle detection:
 -- Count base sockets (colored/meta) vs TOTAL sockets (all EMPTY_SOCKET_*).
 -- A buckle adds exactly +1 socket; even if empty we still see TOTAL > BASE.
 local function ED_HasBuckle_ByGems(unit, slot)
@@ -333,17 +389,22 @@ local function TI_FindItemListFrameFromArgs(...)
     return nil
 end
 
+
 local function ShowGemAndEnchant(frame, ItemLink, anchorFrame, itemframe)
-    -- Always try to recover a missing link on the player's PaperDoll
+    -- Link retten (Player-PaperDoll)
     if (not ItemLink) and itemframe then
-        local unit = TI_ResolveUnitFromItemFrame(itemframe)
-        if unit and itemframe.index then
-            ItemLink = GetInventoryItemLink(unit, itemframe.index)
+        local unitX = TI_ResolveUnitFromItemFrame(itemframe)
+        if unitX and itemframe.index then
+            ItemLink = GetInventoryItemLink(unitX, itemframe.index)
         end
     end
-    if (not ItemLink) then
-        return 0
-    end
+    if not ItemLink then return 0 end
+	local alreadyHasProfessionEnchant = false
+    local unit = TI_ResolveUnitFromItemFrame(itemframe) or "player"
+
+    -- =========================
+    -- 1) GEM ICONS
+    -- =========================
     local num, info, qty = LibItemGem:GetItemGemInfo(ItemLink)
     local _, quality, texture, icon, r, g, b
     for i, v in ipairs(info) do
@@ -365,144 +426,202 @@ local function ShowGemAndEnchant(frame, ItemLink, anchorFrame, itemframe)
         icon:Show()
         anchorFrame = icon
     end
-	-- Belt Buckle Check (MoP)
-	if itemframe and itemframe.index == INVSLOT_WAIST then
-		local unit = TI_ResolveUnitFromItemFrame(itemframe)
-		local waistLink = GetInventoryItemLink(unit, INVSLOT_WAIST) or ItemLink
 
-		local hasBuckle, baseSockets, gemSlots, _ = ED_HasBuckle_ByGems(unit, INVSLOT_WAIST)
+    -- =========================
+    -- 2) GÜRTEL-SCHNALLE
+    -- =========================
+    if itemframe and itemframe.index == INVSLOT_WAIST then
+        local hasBuckle = false
+        local unitB    = TI_ResolveUnitFromItemFrame(itemframe) or "player"
+        local waist    = GetInventoryItemLink(unitB, INVSLOT_WAIST) or ItemLink
 
-		-- Fallback ONLY for yourself: a belt enchant id implies buckle present (older clients)
-		if unit == "player" and waistLink and not hasBuckle then
-			local enchantId = TI_GetEnchantIdFromItemLink(waistLink)
-			local eItemID, eID = LibItemEnchant:GetEnchantItemID(waistLink)
-			local eSpellID    = LibItemEnchant:GetEnchantSpellID(waistLink)
-			local hasEnchant  = (enchantId and enchantId > 0)
-							 or (eItemID and eItemID ~= 0)
-							 or (eSpellID and eSpellID ~= 0)
-							 or (eID and eID ~= 0)
-			if hasEnchant then
-				hasBuckle = true
-			end
-		end
-
-		-- Extra fallback ONLY for yourself: a belt enchant implies buckle present (legacy behavior)
-		if unit == "player" and waistLink and not hasBuckle then
-			local enchantId = TI_GetEnchantIdFromItemLink(waistLink)
-			local eItemID, eID = LibItemEnchant:GetEnchantItemID(waistLink)
-			local eSpellID    = LibItemEnchant:GetEnchantSpellID(waistLink)
-			local hasEnchant  = (enchantId and enchantId > 0)
-							 or (eItemID and eItemID ~= 0)
-							 or (eSpellID and eSpellID ~= 0)
-							 or (eID and eID ~= 0)
-			if hasEnchant then
-				hasBuckle = true
-			end
-		end
-
-		if not hasBuckle then
-			num = num + 1
-			local icon = GetIconFrame(frame)
-			icon.title = (GetLocale():sub(1,2) == "de") and "Gürtelschnalle fehlt" or "Belt Buckle missing"
-			icon.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
-			icon.texture:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
-			icon.itemLink, icon.spellID = nil, nil
-			icon:ClearAllPoints()
-			icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
-			icon:Show()
-		end
-
-		return num * 18
-	end
-
-
-	
-	-- Ring Enchanting. If Profession not available = Ignore!
-	if itemframe and (itemframe.index == 11 or itemframe.index == 12) then
-        --local unit = itemframe:GetParent() and itemframe:GetParent().unit or "player"
-		local unit = TI_ResolveUnitFromItemFrame(itemframe)
-        if not TI_UnitHasEnchanting(unit) then
-            return num * 18
+        local hb = false
+        if unitB and waist then
+            hb = select(1, ED_HasBuckle_ByGems(unitB, INVSLOT_WAIST))
         end
-    end
-	
-	if itemframe and (itemframe.index == 9 or itemframe.index == 10) then -- 9 = Armschienen, 10 = Handschuhe
-		--local unit = itemframe:GetParent() and itemframe:GetParent().unit or "player"
-		local unit = TI_ResolveUnitFromItemFrame(itemframe)
-		if TI_UnitHasBlacksmithing(unit) then
-			local sockets = TI_CountSockets(ItemLink)
-			if sockets == 0 then
-				-- Kein Extra-Sockel -> Warn-Icon
-				num = num + 1
-				local icon = GetIconFrame(frame)
-				icon.title = (GetLocale():sub(1,2) == "de") 
-					and "Extra-Sockel fehlt (Beruf: Schmiedekunst)" 
-					or "Extra Socket missing (Profession: Blacksmithing)"
-				icon.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
-				icon.texture:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
-				icon.itemLink = nil
-				icon.spellID  = nil
-				icon:ClearAllPoints()
-				icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
-				icon:Show()
-			end
-		end
-		-- return num * 18
-	end
+        hasBuckle = hb and true or false
 
-	
-    local enchantItemID, enchantID = LibItemEnchant:GetEnchantItemID(ItemLink)
-    local enchantSpellID = LibItemEnchant:GetEnchantSpellID(ItemLink)
-    local EnchantParts = TinyInspectClassicDB.EnchantParts or {}
-    if (enchantItemID) then
-        num = num + 1
-        icon = GetIconFrame(frame)
-        _, ItemLink, quality, _, _, _, _, _, _, texture = GetItemInfo(enchantItemID)
-        r, g, b = GetItemQualityColor(quality or 0)
-        icon.bg:SetVertexColor(r, g, b)
-        icon.texture:SetTexture(texture)
-        UpdateIconTexture(icon, texture, enchantItemID, "item")
-        icon.itemLink = ItemLink
-        icon:ClearAllPoints()
-        icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
-        icon:Show()
-        anchorFrame = icon
-    elseif (enchantSpellID) then
-        num = num + 1
-        icon = GetIconFrame(frame)
-        _, _, texture = C_Spell.GetSpellInfo(enchantSpellID)
-        icon.bg:SetVertexColor(1,0.82,0)
-        icon.texture:SetTexture(texture)
-        UpdateIconTexture(icon, texture, enchantSpellID, "spell")
-        icon.spellID = enchantSpellID
-        icon:ClearAllPoints()
-        icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
-        icon:Show()
-        anchorFrame = icon
-    elseif (enchantID) then
-        num = num + 1
-        icon = GetIconFrame(frame)
-        icon.title = "#" .. enchantID
-        icon.bg:SetVertexColor(0.1, 0.1, 0.1)
-        icon.texture:SetTexture("Interface\\FriendsFrame\\InformationIcon")
-        icon:ClearAllPoints()
-        icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
-        icon:Show()
-        anchorFrame = icon
-    elseif (not enchantID and EnchantParts[itemframe.index] and EnchantParts[itemframe.index][1]) then
-        if (qty == 6 and (itemframe.index==2 or itemframe.index==16 or itemframe.index==17)) then else
+        if unitB == "player" and waist and not hasBuckle then
+            -- Fallback: Enchant-Info kann Buckle implizieren (ältere Clients)
+            local enchantId   = TI_GetEnchantIdFromItemLink(waist)
+            local eItemID, eID = LibItemEnchant:GetEnchantItemID(waist)
+            local eSpellID     = LibItemEnchant:GetEnchantSpellID(waist)
+            local hasEnchant   = (enchantId and enchantId > 0)
+                              or (eItemID and eItemID ~= 0)
+                              or (eSpellID and eSpellID ~= 0)
+                              or (eID and eID ~= 0)
+            if hasEnchant then
+                hasBuckle = true
+            end
+        end
+
+        if not hasBuckle then
             num = num + 1
-            icon = GetIconFrame(frame)
-            icon.title = ENCHANTS .. ": " .. (_G[EnchantParts[itemframe.index][2]] or EnchantParts[itemframe.index][2])
-            icon.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
-            icon.texture:SetTexture("Interface\\Cursor\\Quest") --QuestRepeatable
-            icon:ClearAllPoints()
-            icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
-            icon:Show()
-            anchorFrame = icon
+            local iconWarn = GetIconFrame(frame)
+            iconWarn.title = (GetLocale():sub(1,2) == "de") and "Gürtelschnalle fehlt" or "Belt Buckle missing"
+            iconWarn.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
+            iconWarn.texture:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
+            iconWarn.itemLink, iconWarn.spellID = nil, nil
+            iconWarn:ClearAllPoints()
+            iconWarn:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+            iconWarn:Show()
+            anchorFrame = iconWarn
         end
     end
-	-- [ADD][FIND THIS: TI_TOOLTIP_FALLBACK]
+
+    -- =========================
+    -- 3) RING-E N C H A N T  (nur warnen, wenn Spieler Enchanting hat)
+    -- =========================
+    if itemframe and (itemframe.index == 11 or itemframe.index == 12) then
+        if unit == "player" and TI_UnitHasEnchanting(unit) then
+            local hasEnchant = LibItemEnchant:GetEnchantSpellID(ItemLink)
+            if not hasEnchant then
+                num = num + 1
+                local iconWarn = GetIconFrame(frame)
+                iconWarn.title = (GetLocale():sub(1,2) == "de") and "Ringverzauberung fehlt" or "Ring enchant missing"
+                iconWarn.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
+                --iconWarn.texture:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
+				iconWarn.texture:SetTexture("Interface\\Icons\\inv_enchant_formulagood_01")
+                iconWarn:ClearAllPoints()
+                iconWarn:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+                iconWarn:Show()
+                anchorFrame = iconWarn
+            end
+        end
+    end
+
+    -- =========================
+    -- 4) BS-EXTRA-SOCKEL (Bracers/Gloves)
+    -- =========================
+    if itemframe and (itemframe.index == 9 or itemframe.index == 10) then
+        if TI_UnitHasBlacksmithing(unit) then
+            local sockets = TI_CountSockets(ItemLink)
+            if sockets == 0 then
+                num = num + 1
+                local iconWarn = GetIconFrame(frame)
+                iconWarn.title = (GetLocale():sub(1,2) == "de")
+                    and "Extra-Sockel fehlt (Beruf: Schmiedekunst)"
+                    or  "Extra Socket missing (Profession: Blacksmithing)"
+                iconWarn.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
+                iconWarn.texture:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
+                iconWarn.itemLink, iconWarn.spellID = nil, nil
+                iconWarn:ClearAllPoints()
+                iconWarn:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+                iconWarn:Show()
+                anchorFrame = iconWarn
+            end
+        end
+    end
+
+    -- =========================
+	-- 5) ENCHANT-ANZEIGE (Item/Spell/ID)
+	-- =========================
+	local enchantItemID, enchantID = LibItemEnchant:GetEnchantItemID(ItemLink)
+	local enchantSpellID = LibItemEnchant:GetEnchantSpellID(ItemLink)
+	local EnchantParts   = TinyInspectClassicDB.EnchantParts or {}
+
+	-- Prüfe, ob der Enchant zu einem Beruf gehört (Engineering, Tailoring, Inscription, Enchanting)
+	local profName, profEnchantID = TI_GetProfessionByEnchant(ItemLink)
+	
+	local isProfessionOnly = false
+	if profName then
+		-- Es ist ein bekannter Berufs-Enchant (z. B. Tinker oder Stickerei)
+		isProfessionOnly = true
+	end
+
+	-- =========================
+	-- Berufseigene Enchants
+	-- =========================
+	if profName and (
+		profName == "Engineering"
+		or profName == "Tailoring"
+		or profName == "Inscription"
+		or profName == "Enchanting"
+	) then
+		-- Wenn ein Enchant erkannt wurde (z.B. Ringverzauberung, Tinker, etc.):
+		-- NICHT hier anzeigen, da der Berufsteil (#8) ihn bereits korrekt behandelt.
+		-- Wir überspringen also einfach die Standard-Enchantanzeige.
+		
+		-- Ausnahme: Wenn kein EnchantSpellID vorhanden ist UND es sich um den eigenen Char handelt,
+		-- darf der Berufsteil später die "fehlend"-Anzeige übernehmen.
+		-- Daher KEIN return, sondern nur skip der Anzeige.
+		alreadyHasProfessionEnchant = true
+	else
+		-- =========================
+		-- STANDARD-ENCHANT-LOGIK (immer anzeigen, wenn vorhanden)
+		-- =========================
+		if not isProfessionOnly then
+			if enchantItemID then
+				num = num + 1
+				local iconE = GetIconFrame(frame)
+				local _, linkE, qE, _, _, _, _, _, _, texE = GetItemInfo(enchantItemID)
+				local rE, gE, bE = GetItemQualityColor(qE or 0)
+				iconE.bg:SetVertexColor(rE, gE, bE)
+				iconE.texture:SetTexture(texE)
+				UpdateIconTexture(iconE, texE, enchantItemID, "item")
+				iconE.itemLink = linkE
+				iconE:ClearAllPoints()
+				iconE:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+				iconE:Show()
+				anchorFrame = iconE
+				alreadyHasProfessionEnchant = true
+
+			elseif enchantSpellID then
+				num = num + 1
+				local iconE = GetIconFrame(frame)
+				local _, _, _, texS = C_Spell.GetSpellInfo(enchantSpellID)
+				iconE.bg:SetVertexColor(0.2, 1.0, 0.2, 0.8)
+				iconE.texture:SetTexture("Interface\\Icons\\inv_enchant_formulagood_01")
+				UpdateIconTexture(iconE, texS, enchantSpellID, "spell")
+				iconE.spellID = enchantSpellID
+				iconE:ClearAllPoints()
+				iconE:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+				iconE:Show()
+				anchorFrame = iconE
+				alreadyHasProfessionEnchant = true
+
+			elseif enchantID then
+				num = num + 1
+				local iconE = GetIconFrame(frame)
+				iconE.title = "#" .. enchantID
+				iconE.bg:SetVertexColor(0.1, 0.1, 0.1)
+				iconE.texture:SetTexture("Interface\\FriendsFrame\\InformationIcon")
+				iconE:ClearAllPoints()
+				iconE:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+				iconE:Show()
+				anchorFrame = iconE
+
+			elseif (not enchantID 
+				and EnchantParts[itemframe.index] 
+				and EnchantParts[itemframe.index][1]
+				and not (
+					itemframe.index == INVSLOT_WAIST or  -- Gürtel (Engineering)
+					--itemframe.index == 10 or             -- Handschuhe (Engineering)
+					--itemframe.index == 15 or             -- Rücken (Tailoring)
+					--itemframe.index == 3 or              -- Schultern (Inscription)
+					itemframe.index == 11 or itemframe.index == 12  -- Ringe (Enchanting)
+				)
+			) then
+				num = num + 1
+				local iconE = GetIconFrame(frame)
+				iconE.title = ENCHANTS .. ": " .. (_G[EnchantParts[itemframe.index][2]] or EnchantParts[itemframe.index][2])
+				iconE.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
+				iconE.texture:SetTexture("Interface\\Cursor\\Quest")
+				iconE:ClearAllPoints()
+				iconE:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+				iconE:Show()
+				anchorFrame = iconE
+				alreadyHasProfessionEnchant = true
+			end
+		end
+	end
+
+
+
+
+    -- =========================
+    -- 6) TOOLTIP-FALLBACK (language specific)
+    -- =========================
     if not (enchantItemID or enchantSpellID or enchantID) then
         local ok, text, isLW = TI_ScanEnchantFromTooltip(ItemLink)
         if ok then
@@ -511,12 +630,10 @@ local function ShowGemAndEnchant(frame, ItemLink, anchorFrame, itemframe)
             icon2.itemLink, icon2.spellID = nil, nil
 
             if isLW then
-                -- We detected a Leatherworking-only enchant (via requirement line).
                 icon2.title = ns.L["LW_ENCHANT_DETECTED"]
                 icon2.bg:SetVertexColor(0.2, 0.8, 0.2, 0.7)
                 icon2.texture:SetTexture("Interface\\ICONS\\Trade_LeatherWorking")
             else
-                -- We found an "Enchanted: ..." line; show the extracted text.
                 icon2.title = string.format("%s: %s", ENCHANTS, text or "?")
                 icon2.bg:SetVertexColor(1, 0.82, 0, 0.5)
                 icon2.texture:SetTexture("Interface\\FriendsFrame\\InformationIcon")
@@ -528,8 +645,178 @@ local function ShowGemAndEnchant(frame, ItemLink, anchorFrame, itemframe)
             anchorFrame = icon2
         end
     end
+
+    -- =========================
+    -- 7) BERUFS-ENCHANTS
+    -- =========================
+    do
+        local profName, profSpellId = TI_GetProfessionByEnchant(ItemLink)  -- <== liefert z.B. "Engineering" wenn tinker
+        if profName and unit == "player" and profName ~= "Enchanting" then
+            local hasProfession = false
+            if profName == "Engineering" and TI_UnitHasEngineering(unit) then
+                hasProfession = true
+            elseif profName == "Tailoring" and (IsSpellKnown(3908) or IsSpellKnown(3910)) then
+                hasProfession = true
+            elseif profName == "Inscription" and IsSpellKnown(45357) then
+                hasProfession = true
+            end
+
+            if hasProfession then
+                num = num + 1
+                local iconP = GetIconFrame(frame)
+                iconP.title = profName .. " Enchant (" .. (profSpellId or 0) .. ")"
+                --iconP.bg:SetVertexColor(0.2, 0.8, 0.2, 0.6)
+                --iconP.texture:SetTexture("Interface\\ICONS\\Trade_" .. profName)
+				iconP.bg:SetVertexColor(0.2, 1.0, 0.2, 0.8)
+				iconP.texture:SetTexture("Interface\\Icons\\inv_enchant_formulagood_01")
+                iconP.itemLink = ItemLink
+                iconP.spellID  = profSpellId
+                iconP:ClearAllPoints()
+                iconP:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+                iconP:Show()
+                anchorFrame = iconP
+            end
+        end
+    end
+	-- 🔹 UNIVERSAL PROFESSION ENCHANT CHECK
+	if itemframe and itemframe.index then
+		-- Wenn das Item bereits eine Berufsverzauberung erkannt und angezeigt hat → überspringen
+		if alreadyHasProfessionEnchant then
+			-- Überspringe diesen Abschnitt, aber fahre mit Upgrades (#8) fort
+		else
+			local unit = TI_ResolveUnitFromItemFrame(itemframe)
+			local isPlayer = (unit == "player")
+
+			-- Profession-Status (nur für eigenen Char ermittelbar)
+			local hasEng  = isPlayer and TI_UnitHasEngineering(unit)
+			local hasTail = isPlayer and (IsSpellKnown(3908) or IsSpellKnown(3910))  -- Tailoring
+			local hasInsc = isPlayer and IsSpellKnown(45357)                         -- Inscription
+			local hasEnchanting = isPlayer and TI_UnitHasEnchanting(unit)
+
+			local slot = itemframe.index
+			local enchantSpellID = LibItemEnchant:GetEnchantSpellID(ItemLink)
+			local prof, profName, iconTex
+
+			-- Slotzuordnung zu Berufs-VZ
+			if slot == 11 or slot == 12 then
+				prof, profName, iconTex = "Enchanting", "Verzauberung", "Interface\\ICONS\\Trade_Enchanting"
+			elseif (slot == INVSLOT_WAIST) or (slot == 10) then
+				prof, profName, iconTex = "Engineering", "Ingenieurskunst", "Interface\\ICONS\\Trade_Engineering"
+			elseif slot == 15 then
+				prof, profName, iconTex = "Tailoring", "Schneiderei", "Interface\\ICONS\\Trade_Tailoring"
+			elseif slot == 3 then
+				prof, profName, iconTex = "Inscription", "Inschriftenkunde", "Interface\\ICONS\\INV_Inscription_Tradeskill01"
+			end
+
+			-- Kein Berufs-Slot? Dann überspringen, aber NICHT returnen!
+			if not prof then
+				-- einfach nichts tun, restliche Funktion (Upgrade etc.) soll weiterlaufen
+			else
+				-- Spell-Listen zur Zuordnung
+				local EngSpells = {
+					[55016] = true, [82175] = true, [82176] = true, [84424] = true,
+					[54736] = true, [55002] = true, [55076] = true, [54793] = true
+				}
+				local TailSpells = {
+					[75172] = true, [75175] = true, [75178] = true,
+					[55769] = true, [55642] = true
+				}
+				local InscSpells = {
+					[61117] = true, [61118] = true, [61119] = true, [61120] = true
+				}
+
+				local isProfessionEnchant = false
+				if prof == "Engineering" and enchantSpellID and EngSpells[enchantSpellID] then
+					isProfessionEnchant = true
+				elseif prof == "Tailoring" and enchantSpellID and TailSpells[enchantSpellID] then
+					isProfessionEnchant = true
+				elseif prof == "Inscription" and enchantSpellID and InscSpells[enchantSpellID] then
+					isProfessionEnchant = true
+				elseif prof == "Enchanting" and enchantSpellID and (slot == 11 or slot == 12) then
+					isProfessionEnchant = true
+				end
+
+				-- Wenn der Berufseffekt auf dem Item ist → immer anzeigen
+				if isProfessionEnchant then
+					num = num + 1
+					local icon = GetIconFrame(frame)
+					local _, _, tex = C_Spell.GetSpellInfo(enchantSpellID)
+					--icon.bg:SetVertexColor(0.2, 1, 0.2, 0.7)
+					--icon.texture:SetTexture(tex or iconTex)
+					icon.bg:SetVertexColor(0.2, 1.0, 0.2, 0.8)
+					icon.texture:SetTexture("Interface\\Icons\\inv_enchant_formulagood_01")
+					icon.spellID = enchantSpellID
+					icon.title = (GetLocale():sub(1,2) == "de")
+						and (profName .. "-Verzauberung")
+						or (prof .. " enchant")
+					icon:ClearAllPoints()
+					icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+					icon:Show()
+					anchorFrame = icon
+
+				-- Nur beim Spieler prüfen, wenn Beruf vorhanden, aber kein Spell drauf
+				elseif isPlayer and not enchantSpellID and (
+					(prof == "Engineering" and hasEng) or
+					(prof == "Tailoring" and hasTail) or
+					(prof == "Inscription" and hasInsc) or
+					(prof == "Enchanting" and hasEnchanting)
+				) then
+					num = num + 1
+					local icon = GetIconFrame(frame)
+					icon.bg:SetVertexColor(1, 0.2, 0.2, 0.6)
+					--icon.texture:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
+					icon.texture:SetTexture("Interface\\Icons\\inv_enchant_formulagood_01")
+					icon.title = (GetLocale():sub(1,2) == "de")
+						and (profName .. "-Verzauberung fehlt")
+						or (prof .. " enchant missing")
+					icon:ClearAllPoints()
+					icon:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+					icon:Show()
+					anchorFrame = icon
+				end
+			end
+		end
+	end
+
+
+
+    -- =========================
+	-- 8) UPGRADE-STUFE (eigener Frame, eigenes Icon)
+	-- =========================
+	if itemframe and itemframe.index then
+		local stage, maxStage = 0, 0
+		if LibItemInfo and unit then
+			stage, maxStage = LibItemInfo:GetUnitItemUpgradeInfo(unit, itemframe.index)
+		end
+		if stage and maxStage and maxStage > 0 then
+			num = num + 1
+			local iconUp = GetIconFrame(frame)
+
+			-- Farben je nach Fortschritt
+			local rU, gU, bU
+			if stage == 0 then
+				rU, gU, bU = 1, 0, 0          -- rot
+			elseif stage < maxStage then
+				rU, gU, bU = 1.0, 0.6, 0.1    -- orange
+			elseif stage >= maxStage then
+				rU, gU, bU = 0.2, 1.0, 0.2    -- grün
+			end
+			iconUp.bg:SetVertexColor(rU, gU, bU, 0.75)
+
+			iconUp.texture:SetTexture(nil)
+			iconUp.title = string.format("Upgrade: %d/%d", stage, maxStage)
+			iconUp.itemLink, iconUp.spellID = nil, nil
+			iconUp:ClearAllPoints()
+			iconUp:SetPoint("LEFT", anchorFrame, "RIGHT", num == 1 and 6 or 1, 0)
+			iconUp:Show()
+			anchorFrame = iconUp
+		end
+	end
+
+
     return num * 18
 end
+
 
 hooksecurefunc("ShowInspectItemListFrame", function(unit, parent, itemLevel, maxLevel)
     local frame = parent.inspectFrame
