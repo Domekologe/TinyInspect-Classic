@@ -1,10 +1,10 @@
-## Interface: 50502
+## Interface: 50503
 
 ## Title: TinyInspect-Classic |cFF69CCF0by Shiriana-Everlook|r
 ## Description: |cff4488ffTinyInspect (Classic)|r|n Show ItemLevel For Inspect - Party / Raid / Mouse / Bag / Bank
 ## Notes: |cff4488ffTinyInspect (Classic)|r|n Show ItemLevel For Inspect - Party / Raid / Mouse / Bag / Bank
 ## Author: Domekologe
-## Version: 12.5.1
+## Version: 12.5.2
 ## SavedVariables: TinyInspectClassicDB
 ## IconTexture: Interface\AddOns\TinyInspect-Classic\images\Icon.tga
 ## License: MIT License
